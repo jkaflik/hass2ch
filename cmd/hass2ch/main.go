@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"os"
 	"os/signal"
 
@@ -10,39 +12,43 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-func main() {
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
-	log.Logger.Level(zerolog.DebugLevel)
+var (
+	logLevel = flag.String("log-level", "info", "Log level")
+
+	host   = flag.String("host", "homeassistant.local", "Home Assistant host")
+	secure = flag.Bool("secure", false, "Use secure connection")
+)
+
+func client(ctx context.Context) (*hass.Client, error) {
+	schema := "ws"
+	if *secure {
+		schema = "wss"
+	}
+
+	url := fmt.Sprintf("%s://%s", schema, *host)
+
+	token := os.Getenv("HASS_TOKEN")
+	if token == "" {
+		return nil, fmt.Errorf("HASS_TOKEN environment variable not set")
+	}
 
 	c := &hass.Client{
-		Host:  "wss://hass.kaflik.tech",
-		Token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJkMDIwZWM0YWVjNTU0ZmMzOGY5NmNkMjhiMTRkZGRkYiIsImlhdCI6MTcyMjg3MzUzNSwiZXhwIjoyMDM4MjMzNTM1fQ.V5E-PEevypfXVsTX820ys54k_cbNTza7u0TPX8vehxw",
+		Host:  url,
+		Token: token,
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-
-	//go func() {
-	//	for msg := range c.Receive {
-	//		log.Info().Interface("msg", msg).Msg("Received message")
-	//	}
-	//
-	//	log.Info().Msg("Receive channel closed")
-	//}()
-
-	// implement a signal handler to call cancel() when the program is interrupted
 
 	if err := c.Connect(ctx); err != nil {
-		log.Err(err).Msg("Failed to connect to Home Assistant")
-		cancel()
-		return
+		return nil, err
 	}
 
-	c.WaitAuthenticated(ctx)
+	return c, c.WaitAuthenticated(ctx)
+}
 
-	events, err := c.SubscribeEvents(ctx)
+func dumpEvents(ctx context.Context, c *hass.Client) {
+	cv, err := c.SubscribeEvents(ctx)
+
 	if err != nil {
-		log.Err(err).Msg("Failed to subscribe to events")
-		cancel()
+		log.Fatal().Err(err).Msg("Failed to subscribe to events")
 		return
 	}
 
@@ -50,15 +56,51 @@ func main() {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Info().Msg("Shutting down event loop")
 				return
-			case event := <-events:
-				log.Info().Interface("event", event.String()).Msg("Received event")
+			case v := <-cv:
+				fmt.Println(v)
+				log.Info().Msg("Event received")
 			}
 		}
 	}()
+}
 
-	// implement a signal handler to call cancel() when the program is interrupted
+func main() {
+	ll, err := zerolog.ParseLevel(*logLevel)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to parse log level")
+	}
+
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	log.Logger.Level(ll)
+
+	flag.Parse()
+	args := flag.Args()
+
+	if len(args) == 0 || args[0] == "help" {
+		fmt.Println("Usage: hass2ch [command]")
+		fmt.Println()
+		fmt.Println("Commands:")
+		fmt.Println("  help  Show this help message")
+		fmt.Println("  dump  Dump events to stdout")
+		return
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	c, err := client(ctx)
+	if err != nil {
+		log.Err(err).Msg("Failed to create Home Assistant client")
+		return
+	}
+
+	switch {
+	case args[0] == "dump":
+		dumpEvents(ctx, c)
+	default:
+		log.Fatal().Msgf("Unknown command: %s", args[0])
+	}
 
 	<-ctx.Done()
 	log.Info().Msg("Shutting down")

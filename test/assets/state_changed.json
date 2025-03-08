@@ -1,0 +1,111 @@
+{
+  "type": "event",
+  "event": {
+    "event_type": "state_changed",
+    "data": {
+      "entity_id": "sensor.temperature",
+      "old_state": {
+        "entity_id": "sensor.temperature",
+        "state": "24",
+        "attributes": {
+          "state_class": "measurement",
+          "current": null,
+          "device": {
+            "applicationVersion": 32,
+            "dateCode": "09-22-2020",
+            "friendlyName": "reku_power",
+            "hardwareVersion": 1,
+            "ieeeAddr": "0x54ef44100028dcdc",
+            "manufacturerID": 4447,
+            "manufacturerName": "LUMI",
+            "model": "SP-EUC01",
+            "networkAddress": 41458,
+            "powerSource": "Mains (single phase)",
+            "stackVersion": 2,
+            "type": "Router",
+            "zclVersion": 3
+          },
+          "device_temperature": 24,
+          "energy": 683.14,
+          "last_seen": "2024-08-20T20:32:00.282Z",
+          "linkquality": 255,
+          "power": 16.5,
+          "power_outage_memory": true,
+          "update": {
+            "installed_version": 32,
+            "latest_version": 32,
+            "state": "idle"
+          },
+          "update_available": false,
+          "voltage": null,
+          "unit_of_measurement": "°C",
+          "device_class": "temperature",
+          "friendly_name": "reku_power reku_power_device_temperature"
+        },
+        "last_changed": "2024-08-20T19:28:08.555689+00:00",
+        "last_reported": "2024-08-20T20:32:00.295576+00:00",
+        "last_updated": "2024-08-20T20:32:00.295576+00:00",
+        "context": {
+          "id": "01J5RQTGS79C8T2CD2Y9Y9A36Q",
+          "parent_id": null,
+          "user_id": null
+        }
+      },
+      "new_state": {
+        "entity_id": "sensor.reku_power_device_temperature",
+        "state": "24",
+        "attributes": {
+          "state_class": "measurement",
+          "current": null,
+          "device": {
+            "applicationVersion": 32,
+            "dateCode": "09-22-2020",
+            "friendlyName": "reku_power",
+            "hardwareVersion": 1,
+            "ieeeAddr": "0x54ef44100028dcdc",
+            "manufacturerID": 4447,
+            "manufacturerName": "LUMI",
+            "model": "SP-EUC01",
+            "networkAddress": 41458,
+            "powerSource": "Mains (single phase)",
+            "stackVersion": 2,
+            "type": "Router",
+            "zclVersion": 3
+          },
+          "device_temperature": 24,
+          "energy": 683.14,
+          "last_seen": "2024-08-20T20:32:05.688Z",
+          "linkquality": 255,
+          "power": 16.5,
+          "power_outage_memory": true,
+          "update": {
+            "installed_version": 32,
+            "latest_version": 32,
+            "state": "idle"
+          },
+          "update_available": false,
+          "voltage": null,
+          "unit_of_measurement": "°C",
+          "device_class": "temperature",
+          "friendly_name": "reku_power reku_power_device_temperature"
+        },
+        "last_changed": "2024-08-20T19:28:08.555689+00:00",
+        "last_reported": "2024-08-20T20:32:05.699883+00:00",
+        "last_updated": "2024-08-20T20:32:05.699883+00:00",
+        "context": {
+          "id": "01J5RQTP23G7YQNPSRD5RFA3J5",
+          "parent_id": null,
+          "user_id": null
+        }
+      }
+    },
+    "origin": "LOCAL",
+    "time_fired": "2024-08-20T20:32:05.699883+00:00",
+    "context": {
+      "id": "01J5RQTP23G7YQNPSRD5RFA3J5",
+      "parent_id": null,
+      "user_id": null
+    }
+  },
+  "id": 1
+}

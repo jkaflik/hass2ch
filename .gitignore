@@ -1,2 +1,4 @@
 .idea
 *.iml
+*sensitive.json
+*sensitive.ndjson

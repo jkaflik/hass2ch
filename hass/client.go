@@ -28,14 +28,16 @@ type Client struct {
 	subscribeEventsResultTimeout time.Duration
 }
 
-func (c *Client) WaitAuthenticated(ctx context.Context) {
+func (c *Client) WaitAuthenticated(ctx context.Context) error {
 	for !c.isAuthenticated {
 		select {
 		case <-ctx.Done():
-			return
+			return ctx.Err()
 		default:
 		}
 	}
+
+	return nil
 }
 
 func (c *Client) Connect(ctx context.Context) error {
@@ -126,6 +128,70 @@ func (c *Client) SubscribeEvents(ctx context.Context) (chan *fastjson.Value, err
 	return resultChan, nil
 }
 
+func (c *Client) GetStates(ctx context.Context) (*fastjson.Value, error) {
+	c.activeReceiversMtx.Lock()
+	c.activeReceiversNum++
+	receiverNum := c.activeReceiversNum
+
+	payload := fmt.Sprintf(`{"id": %d, "type": "get_states"}`, receiverNum)
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+		return nil, fmt.Errorf("failed to send message to Home Assistant: %w", err)
+	}
+
+	if c.activeReceivers == nil {
+		bufferSize := 1
+		if c.receiverBufferSize > 0 {
+			bufferSize = c.receiverBufferSize
+		}
+		c.activeReceivers = make(map[int]chan *fastjson.Value, bufferSize)
+	}
+
+	resultChan := make(chan *fastjson.Value)
+	c.activeReceivers[receiverNum] = resultChan
+	c.activeReceiversMtx.Unlock()
+
+	resultTimeout := subscribeEventsResultDefaultTimeout
+	if c.subscribeEventsResultTimeout > 0 {
+		resultTimeout = c.subscribeEventsResultTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, resultTimeout)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("timeout waiting for Home Assistant to acknowledge subscription")
+	case v := <-resultChan:
+		if typ := string(v.GetStringBytes("type")); typ != MessageTypeResult {
+			log.Error().Str("type", typ).Msg("Unexpected message type received waiting for a result")
+
+			return nil, fmt.Errorf("unexpected message type received waiting for a result: %s", typ)
+		}
+
+		success := v.GetBool("success")
+		if !success {
+			defer c.closeReceiver(receiverNum)
+
+			log.Error().
+				Str("code", string(v.GetStringBytes("error.code"))).
+				Str("message", string(v.GetStringBytes("error.message"))).
+				Msg("Failed to get states")
+
+			return nil, fmt.Errorf(
+				"failed to get states: %s: %s",
+				string(v.GetStringBytes("error.code")),
+				string(v.GetStringBytes("error.message")),
+			)
+		}
+
+		log.Info().
+			Int("id", receiverNum).
+			Msg("Received states")
+
+		return v, nil
+	}
+}
+
 func (c *Client) closeReceiver(receiverNum int) {
 	c.activeReceiversMtx.Lock()
 	defer c.activeReceiversMtx.Unlock()
@@ -142,7 +208,7 @@ func (c *Client) receive() {
 		default:
 			_, payload, err := c.conn.ReadMessage()
 			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					log.Info().Msg("Home Assistant websocket connection closed")
 					return
 				}
