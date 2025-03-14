@@ -31,7 +31,7 @@ dockers:
     image_templates:
       - ghcr.io/jkaflik/hass2ch:{{ .Version }}-amd64
       - ghcr.io/jkaflik/hass2ch:latest-amd64
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: Dockerfile
     build_flag_templates:
       - --platform=linux/amd64
       - --label=org.opencontainers.image.created={{.Date}}
@@ -48,7 +48,7 @@ dockers:
     image_templates:
       - ghcr.io/jkaflik/hass2ch:{{ .Version }}-arm64
       - ghcr.io/jkaflik/hass2ch:latest-arm64
-    dockerfile: Dockerfile.goreleaser
+    dockerfile: Dockerfile
     build_flag_templates:
       - --platform=linux/arm64
       - --label=org.opencontainers.image.created={{.Date}}
