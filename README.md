@@ -114,6 +114,99 @@ The included Grafana dashboards provide visibility into:
 2. **Database operation performance**
 3. **Retry patterns and success rates**
 
+## Data Model and Processing Pipeline
+
+### Data Mapping
+
+Home Assistant state change events are mapped to ClickHouse tables dynamically based on entity domains. Each entity domain gets its own table with type inference based on the entity type.
+
+```mermaid
+flowchart TD
+    A[Home Assistant Events] --> B[Event Processing Pipeline]
+    B --> C{Entity Domain}
+    C -->|switch| D[switch table]
+    C -->|light| E[light table]
+    C -->|sensor| F[sensor classification]
+    F -->|numeric value| G[numeric_sensor table]
+    F -->|boolean value| H[binary_sensor table]
+    F -->|text value| I[sensor table]
+    C -->|other domains| J[domain-specific tables]
+```
+
+### ClickHouse Table Schema
+
+Each domain-specific table follows this structure:
+
+```sql
+CREATE TABLE IF NOT EXISTS hass.{domain} (
+    entity_id LowCardinality(String),
+    state {StateType},
+    old_state {StateType},
+    attributes JSON,
+    context JSON,
+    last_changed DateTime64(3, 'UTC'),
+    last_updated DateTime64(3, 'UTC'),
+    last_reported DateTime64(3, 'UTC'),
+    received_at DateTime64(3, 'UTC') DEFAULT now64(3)
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(last_updated)
+ORDER BY (entity_id, last_updated)
+```
+
+The `{StateType}` is automatically determined based on the entity domain:
+- Boolean entities (switches, binary sensors): `Bool`
+- Numeric sensors: `Float64`
+- Number inputs: `Nullable(Float64)`
+- Counters: `Int64`
+- Date/time entities: `DateTime`
+- Other entities: `String` or `LowCardinality(String)` depending on cardinality
+
+### Processing Pipeline
+
+```mermaid
+flowchart LR
+    A[Home Assistant\nWebSocket Events] --> B[Filter state_changed\nevents]
+    B --> C[Group by entity domain]
+    C --> D[Batch events]
+    D --> E[Create tables\nif needed]
+    E --> F[Insert data to\nClickHouse]
+```
+
+The pipeline performs the following transformations:
+
+1. **Filtering**: Only `state_changed` events are processed
+2. **Entity classification**:
+   - Sensor entities are further classified as:
+     - `numeric_sensor` if the state is a number
+     - `binary_sensor` if the state is "on/off" or "true/false"
+     - `sensor` for other text values
+3. **Data normalization**:
+   - Boolean values are converted to true/false
+   - Unknown or unavailable states are handled
+4. **Table creation**: Tables are dynamically created for new entity domains
+5. **Batching**: Events are batched by domain for efficient insertion
+6. **Insertion**: Data is inserted into the appropriate tables
+
+### Retry Mechanism
+
+The pipeline includes a robust retry system for resilience against transient failures:
+
+```mermaid
+flowchart TD
+    A[Database Operation] --> B{Success?}
+    B -->|Yes| C[Process Next Batch]
+    B -->|No| D[Apply Backoff]
+    D --> E{Max Retries\nReached?}
+    E -->|No| A
+    E -->|Yes| F[Log Error]
+```
+
+The retry system uses exponential backoff with configurable:
+- Maximum retry attempts
+- Initial retry interval
+- Maximum retry interval
+- Randomization factor to prevent thundering herd
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
