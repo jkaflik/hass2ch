@@ -1,4 +1,4 @@
-package ingestion
+package channel
 
 import (
 	"sync"
@@ -10,10 +10,6 @@ import (
 
 var partitionByFirstLetter = func(s string) (string, error) {
 	return string(s[0]), nil
-}
-
-var partitionAlwaysError = func(s string) (string, error) {
-	return "", assert.AnError
 }
 
 var partitionErrorOnB = func(s string) (string, error) {

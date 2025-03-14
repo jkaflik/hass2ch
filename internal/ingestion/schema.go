@@ -1,125 +1,194 @@
 package ingestion
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jkaflik/hass2ch/hass"
-	"github.com/valyala/fastjson"
+	"github.com/jkaflik/hass2ch/pkg/clickhouse"
 )
 
-func partitionByEventEntityID(v *fastjson.Value) (string, error) {
-	entityID := v.Get("event.data.new_state.entity_id")
-	if entityID == nil {
+// StateChange represents a processed state change event ready for insertion into ClickHouse
+type StateChange struct {
+	EntityID     string `json:"entity_id"`
+	State        any    `json:"state"`
+	OldState     any    `json:"old_state"`
+	Attributes   any    `json:"attributes"`
+	Context      any    `json:"context"`
+	LastChanged  string `json:"last_changed"`
+	LastUpdated  string `json:"last_updated"`
+	LastReported string `json:"last_reported,omitempty"`
+}
+
+func partitionByStateChangeEntityDomain(event *hass.EventMessage) (string, error) {
+	if event.Event.Data.NewState == nil || event.Event.Data.NewState.EntityID == "" {
 		return "", errors.New("event.data.new_state.entity_id is missing")
 	}
-	b, err := entityID.StringBytes()
-	return string(b), err
+	return extractDomainFromState(event.Event.Data.NewState), nil
 }
 
-func resolveInput(v *fastjson.Value) (*insert, error) {
-	eventType := hass.EventType(v.GetStringBytes("event.event_type"))
-
-	switch eventType {
+func resolveInput(event *hass.EventMessage) (*insert, error) {
+	switch event.Event.EventType {
 	case hass.EventTypeStateChanged:
-		return resolveStateChangeDestination(v)
+		return resolveStateChangeDestination(event)
 	default:
-		return nil, fmt.Errorf("unsupported event type: %s", eventType)
+		return nil, fmt.Errorf("unsupported event type: %s", event.Event.EventType)
 	}
 }
 
-func resolveStateChangeDestination(v *fastjson.Value) (*insert, error) {
-	data := v.Get("event.data")
-	if data == nil {
-		return nil, errors.New("event.data is missing")
-	}
+func resolveStateChangeDestination(event *hass.EventMessage) (*insert, error) {
+	data := event.Event.Data
 
-	entityID := string(data.GetStringBytes("entity_id"))
-	if entityID == "" {
+	if data.EntityID == "" {
 		return nil, errors.New("event.data.entity_id is missing")
 	}
 
-	oldState := data.Get("old_state")
-	if oldState == nil {
+	if data.OldState == nil {
 		return nil, errors.New("event.data.old_state is missing")
 	}
 
-	newState := data.Get("new_state")
-	if newState == nil {
+	if data.NewState == nil {
 		return nil, errors.New("event.data.new_state is missing")
 	}
 
-	domainName, _, found := strings.Cut(entityID, ".")
-	if !found {
-		return nil, errors.New("entity ID is missing a domain")
-	}
+	domain := extractDomainFromState(event.Event.Data.NewState)
 
-	input, err := resolveStateChangeInput(oldState, newState)
+	input, err := resolveStateChangeInput(domain, data.OldState, data.NewState)
 	if err != nil {
 		return nil, err
 	}
 
 	return &insert{
-		TableName: entityIdToTableName(string(entityID)),
+		Database:  "hass", // Default database, will be overridden in pipeline if needed
+		TableName: domain,
 		Input:     input,
 	}, nil
 }
 
-func resolveStateChangeInput(oldState, newState *fastjson.Value) (*fastjson.Value, error) {
-	stateChange := &fastjson.Value{}
-	stateChange.Set("entity_id", newState.Get("entity_id"))
-	stateChange.Set("state", newState.Get("state"))
-	stateChange.Set("old_state", oldState.Get("state"))
-	stateChange.Set("attributes", newState.Get("attributes"))
-	stateChange.Set("context", newState.Get("context"))
-	stateChange.Set("last_changed", newState.Get("last_changed"))
-	stateChange.Set("last_updated", newState.Get("last_updated"))
-	stateChange.Set("last_reported", newState.Get("last_reported"))
+func resolveStateChangeInput(domain string, oldState, newState *hass.State) (*StateChange, error) {
+	var oldStateValue any = oldState.State
+	var newStateValue any = newState.State
+
+	if isSkippedValue(oldStateValue) {
+		oldStateValue = ""
+	}
+	if isSkippedValue(newStateValue) {
+		return nil, fmt.Errorf("skipping event with unknown state: %s", newStateValue)
+	}
+
+	switch domain {
+	case hass.EntityBinarySensor, hass.EntitySwitch, hass.EntityInputBoolean, hass.EntityBooleanSensor:
+		oldStateValue = normalizeBooleanValue(oldState.State)
+		newStateValue = normalizeBooleanValue(newState.State)
+	}
+
+	stateChange := &StateChange{
+		EntityID:    newState.EntityID,
+		State:       newStateValue,
+		OldState:    oldStateValue,
+		Attributes:  newState.Attributes,
+		Context:     newState.Context,
+		LastChanged: newState.LastChanged.Format(time.RFC3339Nano),
+		LastUpdated: newState.LastUpdated.Format(time.RFC3339Nano),
+	}
+
+	if newState.LastReported != nil {
+		stateChange.LastReported = newState.LastReported.Format(time.RFC3339Nano)
+	}
 
 	return stateChange, nil
 }
 
-func resolveStateChangeType(domainName string, newState *fastjson.Value) (string, error) {
+func resolveStateChangeType(domainName string) string {
 	switch domainName {
-	case "binary_sensor", "switch", "input_boolean":
-		return "Bool", nil
-	case "light", "automation", "scene", "script":
-		return "LowCardinality(String)", nil
-	case "climate":
-		return "LowCardinality(String)", nil
-	case "sensor":
-		// Try to determine if it's a numeric sensor
-		if state := newState.Get("state"); state != nil {
-			if _, err := state.Float64(); err == nil {
-				return "Nullable(Float64)", nil
-			}
-		}
-		return "String", nil
-	case "number", "input_number":
-		return "Nullable(Float64)", nil
-	case "counter":
-		return "Int64", nil
-	case "input_datetime", "timer":
-		return "DateTime", nil
-	case "person", "device_tracker":
-		return "LowCardinality(String)", nil
-	case "weather":
-		return "LowCardinality(String)", nil
+	case hass.EntityBinarySensor,
+		hass.EntitySwitch,
+		hass.EntityInputBoolean,
+		hass.EntityBooleanSensor:
+		return "Bool"
+	case hass.EntityLight,
+		hass.EntityAutomation,
+		hass.EntityScene,
+		hass.EntityScript,
+		hass.EntitySun,
+		hass.EntityDeviceTracker,
+		hass.EntityPerson,
+		hass.EntityZone,
+		hass.EntityWeather,
+		hass.EntityClimate:
+		return "LowCardinality(String)"
+	case hass.EntitySensor:
+		return "String"
+	case hass.EntityNumericSensor:
+		return "Float64"
+	case hass.EntityNumber,
+		hass.EntityInputNumber:
+		return "Nullable(Float64)"
+	case hass.EntityCounter:
+		return "Int64"
+	case hass.EntityInputDateTime,
+		hass.EntityTimer,
+		hass.EntityImage:
+		return "DateTime"
 	default:
-		return "String", nil
+		return "String"
 	}
 }
 
-// entityIdToTableName converts an entity ID to a table name.
+// extractDomainFromState extracts the domain from an entity ID.
 // The entity ID is expected to be in the format domain.object_id.
-// The table name is the entity ID with the dots replaced by underscores.
-func entityIdToTableName(entityID string) string {
-	return strings.Replace(entityID, ".", "_", -1)
+// If the domain is sensor and the state is a number, the domain is changed to numeric_sensor.
+func extractDomainFromState(state *hass.State) string {
+	domain, _, _ := strings.Cut(state.EntityID, ".")
+
+	if domain == hass.EntitySensor {
+		switch state.State {
+		case "on", "true", "off", "false":
+			return hass.EntityBinarySensor
+		default:
+		}
+
+		if _, err := strconv.ParseFloat(state.State, 64); err == nil {
+			return hass.EntityNumericSensor
+		}
+	}
+
+	return domain
 }
 
 type insert struct {
 	Database  string
 	TableName string
-	Input     *fastjson.Value
+	Input     interface{}
+}
+
+// createStateChangeTable creates a table for a state change event in ClickHouse
+func createStateChangeTable(ctx context.Context, client *clickhouse.Client, database, tableName string, stateType string) error {
+	query := fmt.Sprintf(stateChangeDDL, database, tableName, stateType, stateType)
+	return client.Execute(ctx, query, nil)
+}
+
+func normalizeBooleanValue(value string) any {
+	switch value {
+	case hass.BooleanOnValue, hass.BooleanTrueValue:
+		return true
+	case hass.BooleanOffValue, hass.BooleanFalseValue:
+		return false
+	}
+
+	return value
+}
+
+func isSkippedValue(value any) bool {
+	switch value {
+	case "", hass.UnknownValue, hass.UnavailableValue:
+		return true
+	default:
+	}
+
+	return false
 }

@@ -1,0 +1,85 @@
+version: 2
+project_name: hass2ch
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: hass2ch
+    main: ./cmd/hass2ch
+    binary: hass2ch
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+# Docker images configuration
+dockers:
+  - id: hass2ch-amd64
+    goos: linux
+    goarch: amd64
+    ids:
+      - hass2ch
+    image_templates:
+      - ghcr.io/jkaflik/hass2ch:{{ .Version }}-amd64
+      - ghcr.io/jkaflik/hass2ch:latest-amd64
+    dockerfile: Dockerfile.goreleaser
+    build_flag_templates:
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.created={{.Date}}
+      - --label=org.opencontainers.image.title={{.ProjectName}}
+      - --label=org.opencontainers.image.revision={{.FullCommit}}
+      - --label=org.opencontainers.image.version={{.Version}}
+      - --label=org.opencontainers.image.source={{.GitURL}}
+
+  - id: hass2ch-arm64
+    goos: linux
+    goarch: arm64
+    ids:
+      - hass2ch
+    image_templates:
+      - ghcr.io/jkaflik/hass2ch:{{ .Version }}-arm64
+      - ghcr.io/jkaflik/hass2ch:latest-arm64
+    dockerfile: Dockerfile.goreleaser
+    build_flag_templates:
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.created={{.Date}}
+      - --label=org.opencontainers.image.title={{.ProjectName}}
+      - --label=org.opencontainers.image.revision={{.FullCommit}}
+      - --label=org.opencontainers.image.version={{.Version}}
+      - --label=org.opencontainers.image.source={{.GitURL}}
+
+# Multi-platform Docker manifest
+docker_manifests:
+  - name_template: ghcr.io/jkaflik/hass2ch:{{ .Version }}
+    image_templates:
+      - ghcr.io/jkaflik/hass2ch:{{ .Version }}-amd64
+      - ghcr.io/jkaflik/hass2ch:{{ .Version }}-arm64
+  
+  - name_template: ghcr.io/jkaflik/hass2ch:latest
+    image_templates:
+      - ghcr.io/jkaflik/hass2ch:latest-amd64
+      - ghcr.io/jkaflik/hass2ch:latest-arm64
+
+archives:
+  - files:
+      - README.md
+      - LICENSE*
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^ci:'
+      - Merge pull request
+      - Merge branch

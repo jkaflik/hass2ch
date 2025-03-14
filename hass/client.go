@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/gorilla/websocket"
 	"github.com/rs/zerolog/log"
-	"github.com/valyala/fastjson"
 )
 
 // Client is a websocket API client for Home Assistant
@@ -18,8 +18,9 @@ type Client struct {
 	Token string
 
 	receiveCtx         context.Context
+	receiveCancel      context.CancelFunc
 	activeReceiversNum int
-	activeReceivers    map[int]chan *fastjson.Value
+	activeReceivers    map[int]chan interface{}
 	activeReceiversMtx sync.Mutex
 
 	conn                         *websocket.Conn
@@ -34,6 +35,7 @@ func (c *Client) WaitAuthenticated(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
 
@@ -43,7 +45,7 @@ func (c *Client) WaitAuthenticated(ctx context.Context) error {
 func (c *Client) Connect(ctx context.Context) error {
 	url := fmt.Sprintf("%s/api/websocket", c.Host)
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, http.Header{
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, http.Header{ //nolint:bodyclose
 		"User-Agent": []string{"hass2ch"},
 	})
 
@@ -52,7 +54,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	c.conn = conn
-	c.receiveCtx = context.Background()
+	c.receiveCtx, c.receiveCancel = context.WithCancel(context.Background())
 
 	go c.receive()
 
@@ -60,82 +62,45 @@ func (c *Client) Connect(ctx context.Context) error {
 }
 
 const (
-	subscribeEventsCommandPayload       = `{"id": %d, "type": "subscribe_events"}`
 	subscribeEventsResultDefaultTimeout = time.Second * 5
 )
 
-func (c *Client) SubscribeEvents(ctx context.Context) (chan *fastjson.Value, error) {
-	c.activeReceiversMtx.Lock()
-	c.activeReceiversNum++
-	receiverNum := c.activeReceiversNum
+type SubscribeEventsOption func(message *SubscribeEventsMessage)
 
-	payload := fmt.Sprintf(subscribeEventsCommandPayload, receiverNum)
-
-	if err := c.conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
-		return nil, fmt.Errorf("failed to send message to Home Assistant: %w", err)
+func SubscribeEventsWithEventType(eventType EventType) SubscribeEventsOption {
+	return func(message *SubscribeEventsMessage) {
+		message.EventType = eventType
 	}
-
-	if c.activeReceivers == nil {
-		bufferSize := 1
-		if c.receiverBufferSize > 0 {
-			bufferSize = c.receiverBufferSize
-		}
-		c.activeReceivers = make(map[int]chan *fastjson.Value, bufferSize)
-	}
-
-	resultChan := make(chan *fastjson.Value)
-	c.activeReceivers[receiverNum] = resultChan
-	c.activeReceiversMtx.Unlock()
-
-	resultTimeout := subscribeEventsResultDefaultTimeout
-	if c.subscribeEventsResultTimeout > 0 {
-		resultTimeout = c.subscribeEventsResultTimeout
-	}
-	ctx, cancel := context.WithTimeout(ctx, resultTimeout)
-	defer cancel()
-
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("timeout waiting for Home Assistant to acknowledge subscription")
-	case v := <-resultChan:
-		if typ := string(v.GetStringBytes("type")); typ != MessageTypeResult {
-			log.Error().Str("type", typ).Msg("Unexpected message type received waiting for a result")
-
-			return nil, fmt.Errorf("unexpected message type received waiting for a result: %s", typ)
-		}
-
-		success := v.GetBool("success")
-		if !success {
-			defer c.closeReceiver(receiverNum)
-
-			log.Error().
-				Str("code", string(v.GetStringBytes("error.code"))).
-				Str("message", string(v.GetStringBytes("error.message"))).
-				Msg("Subscription failed")
-
-			return nil, fmt.Errorf(
-				"subscription failed: %s: %s",
-				string(v.GetStringBytes("error.code")),
-				string(v.GetStringBytes("error.message")),
-			)
-		}
-
-		log.Info().
-			Int("id", receiverNum).
-			Msg("Subscribed to events")
-	}
-
-	return resultChan, nil
 }
 
-func (c *Client) GetStates(ctx context.Context) (*fastjson.Value, error) {
+// SubscribeEvents subscribes to Home Assistant events and returns a channel that will receive the events
+//
+//nolint:gocyclo
+func (c *Client) SubscribeEvents(ctx context.Context, opts ...SubscribeEventsOption) (chan *EventMessage, error) {
 	c.activeReceiversMtx.Lock()
 	c.activeReceiversNum++
 	receiverNum := c.activeReceiversNum
 
-	payload := fmt.Sprintf(`{"id": %d, "type": "get_states"}`, receiverNum)
+	// Create subscription command
+	cmd := SubscribeEventsMessage{
+		BaseMessage: BaseMessage{
+			ID:   receiverNum,
+			Type: MessageTypeSubscribeEvents,
+		},
+	}
 
-	if err := c.conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+	for _, opt := range opts {
+		opt(&cmd)
+	}
+
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		c.activeReceiversMtx.Unlock()
+		return nil, fmt.Errorf("failed to marshal subscribe events message: %w", err)
+	}
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		c.activeReceiversMtx.Unlock()
 		return nil, fmt.Errorf("failed to send message to Home Assistant: %w", err)
 	}
 
@@ -144,59 +109,164 @@ func (c *Client) GetStates(ctx context.Context) (*fastjson.Value, error) {
 		if c.receiverBufferSize > 0 {
 			bufferSize = c.receiverBufferSize
 		}
-		c.activeReceivers = make(map[int]chan *fastjson.Value, bufferSize)
+		c.activeReceivers = make(map[int]chan interface{}, bufferSize)
 	}
 
-	resultChan := make(chan *fastjson.Value)
+	// Create a channel to receive all message types
+	resultChan := make(chan interface{})
 	c.activeReceivers[receiverNum] = resultChan
 	c.activeReceiversMtx.Unlock()
 
+	// Create a timeout context for waiting for the subscription result
 	resultTimeout := subscribeEventsResultDefaultTimeout
 	if c.subscribeEventsResultTimeout > 0 {
 		resultTimeout = c.subscribeEventsResultTimeout
 	}
-	ctx, cancel := context.WithTimeout(ctx, resultTimeout)
+	timeoutCtx, cancel := context.WithTimeout(ctx, resultTimeout)
 	defer cancel()
 
+	// Wait for the subscription result
 	select {
-	case <-ctx.Done():
+	case <-timeoutCtx.Done():
+		c.closeReceiver(receiverNum)
 		return nil, fmt.Errorf("timeout waiting for Home Assistant to acknowledge subscription")
-	case v := <-resultChan:
-		if typ := string(v.GetStringBytes("type")); typ != MessageTypeResult {
-			log.Error().Str("type", typ).Msg("Unexpected message type received waiting for a result")
-
-			return nil, fmt.Errorf("unexpected message type received waiting for a result: %s", typ)
+	case msg := <-resultChan:
+		// Check if the message is a result message
+		result, ok := msg.(ResultMessage)
+		if !ok {
+			c.closeReceiver(receiverNum)
+			log.Error().Interface("message", msg).Msg("Unexpected message type received waiting for a result")
+			return nil, fmt.Errorf("unexpected message type received waiting for a result")
 		}
 
-		success := v.GetBool("success")
-		if !success {
-			defer c.closeReceiver(receiverNum)
-
+		// Check if the subscription was successful
+		if !result.Success {
+			c.closeReceiver(receiverNum)
 			log.Error().
-				Str("code", string(v.GetStringBytes("error.code"))).
-				Str("message", string(v.GetStringBytes("error.message"))).
-				Msg("Failed to get states")
+				Str("code", result.Error.Code).
+				Str("message", result.Error.Message).
+				Msg("Subscription failed")
 
-			return nil, fmt.Errorf(
-				"failed to get states: %s: %s",
-				string(v.GetStringBytes("error.code")),
-				string(v.GetStringBytes("error.message")),
-			)
+			return nil, fmt.Errorf("subscription failed: %s: %s", result.Error.Code, result.Error.Message)
 		}
 
-		log.Info().
-			Int("id", receiverNum).
-			Msg("Received states")
+		log.Info().Int("id", receiverNum).Msg("Subscribed to events")
+	}
 
-		return v, nil
+	// Create a channel for events only
+	eventChan := make(chan *EventMessage)
+
+	// Start a goroutine to forward events to the event channel
+	go func() {
+		defer close(eventChan)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg, ok := <-resultChan:
+				if !ok {
+					return
+				}
+
+				// Only forward event messages
+				if eventMsg, ok := msg.(*EventMessage); ok {
+					eventChan <- eventMsg
+				}
+			}
+		}
+	}()
+
+	return eventChan, nil
+}
+
+// GetStates gets all states from Home Assistant
+func (c *Client) GetStates(ctx context.Context) ([]State, error) {
+	c.activeReceiversMtx.Lock()
+	c.activeReceiversNum++
+	receiverNum := c.activeReceiversNum
+
+	// Create get states command
+	cmd := BaseMessage{
+		ID:   receiverNum,
+		Type: "get_states",
+	}
+
+	payload, err := json.Marshal(cmd)
+	if err != nil {
+		c.activeReceiversMtx.Unlock()
+		return nil, fmt.Errorf("failed to marshal get states message: %w", err)
+	}
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
+		c.activeReceiversMtx.Unlock()
+		return nil, fmt.Errorf("failed to send message to Home Assistant: %w", err)
+	}
+
+	if c.activeReceivers == nil {
+		bufferSize := 1
+		if c.receiverBufferSize > 0 {
+			bufferSize = c.receiverBufferSize
+		}
+		c.activeReceivers = make(map[int]chan interface{}, bufferSize)
+	}
+
+	// Create a channel to receive the result
+	resultChan := make(chan interface{})
+	c.activeReceivers[receiverNum] = resultChan
+	c.activeReceiversMtx.Unlock()
+
+	// Create a timeout context for waiting for the get states result
+	resultTimeout := subscribeEventsResultDefaultTimeout
+	if c.subscribeEventsResultTimeout > 0 {
+		resultTimeout = c.subscribeEventsResultTimeout
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, resultTimeout)
+	defer cancel()
+
+	// Wait for the get states result
+	select {
+	case <-timeoutCtx.Done():
+		c.closeReceiver(receiverNum)
+		return nil, fmt.Errorf("timeout waiting for Home Assistant to acknowledge get states")
+	case msg := <-resultChan:
+		// Check if the message is a result message
+		result, ok := msg.(ResultMessage)
+		if !ok {
+			c.closeReceiver(receiverNum)
+			log.Error().Interface("message", msg).Msg("Unexpected message type received waiting for a result")
+			return nil, fmt.Errorf("unexpected message type received waiting for a result")
+		}
+
+		// Check if the get states was successful
+		if !result.Success {
+			c.closeReceiver(receiverNum)
+			log.Error().
+				Str("code", result.Error.Code).
+				Str("message", result.Error.Message).
+				Msg("Get states failed")
+
+			return nil, fmt.Errorf("get states failed: %s: %s", result.Error.Code, result.Error.Message)
+		}
+
+		log.Info().Int("id", receiverNum).Msg("Received states")
+
+		// Parse the result as a list of states
+		var states []State
+		if err := json.Unmarshal(result.Result, &states); err != nil {
+			return nil, fmt.Errorf("failed to parse states: %w", err)
+		}
+
+		return states, nil
 	}
 }
 
 func (c *Client) closeReceiver(receiverNum int) {
 	c.activeReceiversMtx.Lock()
 	defer c.activeReceiversMtx.Unlock()
-	close(c.activeReceivers[receiverNum])
-	delete(c.activeReceivers, receiverNum)
+	if ch, ok := c.activeReceivers[receiverNum]; ok {
+		close(ch)
+		delete(c.activeReceivers, receiverNum)
+	}
 }
 
 func (c *Client) receive() {
@@ -217,36 +287,43 @@ func (c *Client) receive() {
 				continue
 			}
 
-			v, err := fastjson.ParseBytes(payload)
-
-			typ := string(v.GetStringBytes("type"))
-
-			if typ == "" {
-				log.Error().Msg("Received message from Home Assistant without a type")
+			// Parse the message
+			msg, err := UnmarshalMessage(payload)
+			if err != nil {
+				log.Error().Err(err).Msg("Failed to parse message from Home Assistant")
 				continue
 			}
 
-			switch typ {
-			case MessageTypeAuthRequired:
+			// Handle different message types
+			switch m := msg.(type) {
+			case AuthRequiredMessage:
 				c.authenticate()
-			case MessageTypeAuthOK:
+			case AuthOKMessage:
 				c.isAuthenticated = true
-				version := string(v.GetStringBytes("ha_version"))
-				log.Info().Str("version", version).Msg("Authenticated with Home Assistant")
-			case MessageTypeAuthInvalid:
-				log.Error().Bytes(
-					"message",
-					v.GetStringBytes("message"),
-				).Msg("Failed to authenticate with Home Assistant")
+				log.Info().Str("version", m.Version).Msg("Authenticated with Home Assistant")
+			case AuthInvalidMessage:
+				log.Error().Str("message", m.Message).Msg("Failed to authenticate with Home Assistant")
+			case *EventMessage, ResultMessage:
+				c.handleMessage(m)
 			default:
-				c.handleMessage(v)
+				log.Debug().Interface("message", msg).Msg("Received unhandled message type from Home Assistant")
 			}
 		}
 	}
 }
 
-func (c *Client) handleMessage(v *fastjson.Value) {
-	id := v.GetInt("id")
+func (c *Client) handleMessage(msg interface{}) {
+	// Get the message ID
+	var id int
+	switch m := msg.(type) {
+	case *EventMessage:
+		id = m.ID
+	case ResultMessage:
+		id = m.ID
+	default:
+		log.Warn().Interface("message", msg).Msg("Cannot determine ID of message")
+		return
+	}
 
 	if id == 0 {
 		log.Warn().Msg("Received message from Home Assistant without an ID")
@@ -257,17 +334,20 @@ func (c *Client) handleMessage(v *fastjson.Value) {
 	defer c.activeReceiversMtx.Unlock()
 
 	if c.activeReceivers == nil || c.activeReceivers[id] == nil {
-		log.Warn().Int("id", id).Str("message", v.String()).Msg("Received message from Home Assistant with an unknown ID")
+		log.Warn().Int("id", id).Interface("message", msg).Msg("Received message from Home Assistant with an unknown ID")
 		return
 	}
 
-	c.activeReceivers[id] <- v
+	c.activeReceivers[id] <- msg
 }
 
 func (c *Client) Close() error {
 	log.Info().Msg("Closing Home Assistant websocket connection")
 
-	c.receiveCtx.Done()
+	if c.receiveCancel != nil {
+		c.receiveCancel()
+	}
+
 	return c.conn.Close()
 }
 
@@ -278,7 +358,21 @@ func (c *Client) authenticate() {
 
 	log.Info().Msg("Authenticating with Home Assistant")
 
-	if err := c.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type": "auth", "access_token": "%s"}`, c.Token))); err != nil {
+	// Create authentication message
+	authMsg := AuthMessage{
+		BaseMessage: BaseMessage{
+			Type: MessageTypeAuth,
+		},
+		AccessToken: c.Token,
+	}
+
+	payload, err := json.Marshal(authMsg)
+	if err != nil {
+		log.Err(err).Msg("Failed to marshal auth message")
+		return
+	}
+
+	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 		log.Err(err).Msg("Failed to send auth message to Home Assistant")
 		return
 	}

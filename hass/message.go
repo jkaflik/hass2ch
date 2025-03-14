@@ -26,6 +26,7 @@ type BaseMessage struct {
 type ResultMessage struct {
 	BaseMessage
 	Success bool               `json:"success"`
+	Result  json.RawMessage    `json:"result,omitempty"`
 	Error   ResultMessageError `json:"error,omitempty"`
 }
 
@@ -60,7 +61,7 @@ type AuthInvalidMessage struct {
 
 type SubscribeEventsMessage struct {
 	BaseMessage
-	EventType EventType `json:"event_type"`
+	EventType EventType `json:"event_type,omitempty"`
 }
 
 type EventMessage struct {
@@ -74,10 +75,20 @@ const (
 	EventTypeStateChanged EventType = "state_changed"
 )
 
+type State struct {
+	EntityID     string          `json:"entity_id"`
+	State        string          `json:"state"`
+	Attributes   json.RawMessage `json:"attributes"`
+	LastChanged  time.Time       `json:"last_changed"`
+	LastUpdated  time.Time       `json:"last_updated"`
+	LastReported *time.Time      `json:"last_reported,omitempty"`
+	Context      EventContext    `json:"context"`
+}
+
 type EventData struct {
-	EntityID string          `json:"entity_id"`
-	OldState json.RawMessage `json:"old_state"`
-	NewState json.RawMessage `json:"new_state"`
+	EntityID string `json:"entity_id"`
+	OldState *State `json:"old_state"`
+	NewState *State `json:"new_state"`
 }
 
 type EventContext struct {
@@ -94,44 +105,44 @@ type Event struct {
 	Data      EventData    `json:"data"`
 }
 
-func UnmarshalMessage(raw json.RawMessage) (any, error) {
+func UnmarshalMessage(raw []byte) (interface{}, error) {
 	var m BaseMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal base message: %w", err)
 	}
 
 	switch m.Type {
 	case MessageTypeResult:
 		var m ResultMessage
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to unmarshal result message: %w", err)
 		}
 		return m, nil
 	case MessageTypeAuthRequired:
 		var m AuthRequiredMessage
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to unmarshal auth required message: %w", err)
 		}
 		return m, nil
 	case MessageTypeAuthOK:
 		var m AuthOKMessage
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to unmarshal auth ok message: %w", err)
 		}
 		return m, nil
 	case MessageTypeAuthInvalid:
 		var m AuthInvalidMessage
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to unmarshal auth invalid message: %w", err)
 		}
 		return m, nil
 	case MessageTypeEvent:
 		var m EventMessage
 		if err := json.Unmarshal(raw, &m); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to unmarshal event message: %w", err)
 		}
-		return m, nil
+		return &m, nil // Return pointer to allow interface type checking
 	default:
-		return nil, fmt.Errorf("unknown raw type: %s", m.Type)
+		return nil, fmt.Errorf("unknown message type: %s", m.Type)
 	}
 }

@@ -2,3 +2,4 @@
 *.iml
 *sensitive.json
 *sensitive.ndjson
+dist/
