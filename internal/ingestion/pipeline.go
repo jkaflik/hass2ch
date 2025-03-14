@@ -37,15 +37,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 	metrics.HassConnectionStatus.Set(1)
 	metrics.CHConnectionStatus.Set(1)
 
-	// Track database operations
-	startTime := time.Now()
-	if err := p.createDatabaseIfNotExists(ctx); err != nil {
-		metrics.DatabaseOperationsTotal.WithLabelValues("create_database", "error").Inc()
-		return fmt.Errorf("failed to create database: %w", err)
-	}
-	metrics.DatabaseOperationsTotal.WithLabelValues("create_database", "success").Inc()
-	metrics.CHQueryDuration.WithLabelValues("create_database").Observe(time.Since(startTime).Seconds())
-
 	p.tableExists = make(map[string]bool)
 
 	eventsChan, err := p.hassClient.SubscribeEvents(ctx, hass.SubscribeEventsWithEventType(hass.EventTypeStateChanged))
@@ -201,8 +192,4 @@ func (p *Pipeline) handleStateChangeBatch(ctx context.Context, batch []*hass.Eve
 			Int("rows", len(values)).
 			Msg("inserted data")
 	}
-}
-
-func (p *Pipeline) createDatabaseIfNotExists(ctx context.Context) error {
-	return p.chClient.Execute(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", p.database), nil)
 }

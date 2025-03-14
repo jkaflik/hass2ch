@@ -20,7 +20,8 @@ import (
 )
 
 var (
-	logLevel = flag.String("log-level", "info", "Log level")
+	logLevel  = flag.String("log-level", "info", "Log level")
+	prettyLog = flag.Bool("pretty-log", false, "Enable pretty console logging instead of JSON")
 
 	// Home Assistant connection
 	host   = flag.String("host", "homeassistant.local", "Home Assistant host")
@@ -102,7 +103,14 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to parse log level")
 	}
 
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	if *prettyLog {
+		// Use console writer for pretty output
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+	} else {
+		// Use JSON logging by default
+		zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
+		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+	}
 	log.Logger.Level(ll)
 
 	flag.Parse()
