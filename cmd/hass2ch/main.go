@@ -114,13 +114,12 @@ func main() {
 
 	if *prettyLog {
 		// Use console writer for pretty output
-		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
+		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(ll)
 	} else {
 		// Use JSON logging by default
 		zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
-		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
+		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger().Level(ll)
 	}
-	log.Logger.Level(ll)
 
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Println("Usage: hass2ch [command]")
