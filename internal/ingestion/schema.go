@@ -178,9 +178,9 @@ func normalizeBooleanValue(value string) any {
 		return true
 	case hass.BooleanOffValue, hass.BooleanFalseValue:
 		return false
+	default:
+		return false
 	}
-
-	return value
 }
 
 func isSkippedValue(value any) bool {

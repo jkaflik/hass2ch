@@ -1,0 +1,8 @@
+- alias: "Update random number sensor every 10 seconds"
+  trigger:
+    - platform: time_pattern
+      seconds: "/10"
+  action:
+    - service: homeassistant.update_entity
+      target:
+        entity_id: sensor.random_number

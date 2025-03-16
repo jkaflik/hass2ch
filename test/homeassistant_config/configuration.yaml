@@ -1,0 +1,46 @@
+# Basic configuration for testing hass2ch
+default_config:
+
+# Enable debugging for websocket API
+logger:
+  default: info
+  logs:
+    homeassistant.components.websocket_api: debug
+    homeassistant.components.api: debug
+
+# Allow insecure access for local development
+http:
+  use_x_forwarded_for: true
+  trusted_proxies:
+    - 127.0.0.1
+    - ::1
+
+# Create a demo platform with some test entities
+demo:
+
+# Define a test input_boolean entity
+input_boolean:
+  test_switch:
+    name: Test Switch
+    initial: off
+    icon: mdi:toggle-switch
+
+# Add a script to toggle the state of test_switch every minute
+automation:
+  - alias: "Toggle test switch every minute"
+    trigger:
+      - platform: time_pattern
+        minutes: "/1"
+    action:
+      - service: input_boolean.toggle
+        target:
+          entity_id: input_boolean.test_switch
+
+# Create a dummy sensor that changes value
+sensor:
+  - platform: template
+    sensors:
+      random_number:
+        friendly_name: "Random Number"
+        unit_of_measurement: "units"
+        value_template: "{{ range(1, 100) | random }}"

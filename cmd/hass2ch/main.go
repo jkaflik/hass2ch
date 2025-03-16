@@ -57,10 +57,16 @@ func hassClient(ctx context.Context) (*hass.Client, error) {
 		return nil, fmt.Errorf("HASS_TOKEN environment variable not set")
 	}
 
-	c := &hass.Client{
-		Host:  url,
-		Token: token,
-	}
+	// Create client with reconnection settings
+	c := hass.NewClient(
+		url,
+		token,
+		hass.WithReconnectConfig(
+			1*time.Second,  // Initial reconnect interval
+			30*time.Second, // Max reconnect interval
+			1.5,            // Backoff multiplier
+		),
+	)
 
 	if err := c.Connect(ctx); err != nil {
 		return nil, err
@@ -98,6 +104,9 @@ func dumpEvents(ctx context.Context, c *hass.Client) {
 
 //nolint:gocyclo
 func main() {
+	flag.Parse()
+	args := flag.Args()
+
 	ll, err := zerolog.ParseLevel(*logLevel)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to parse log level")
@@ -112,9 +121,6 @@ func main() {
 		log.Logger = zerolog.New(os.Stderr).With().Timestamp().Logger()
 	}
 	log.Logger.Level(ll)
-
-	flag.Parse()
-	args := flag.Args()
 
 	if len(args) == 0 || args[0] == "help" {
 		fmt.Println("Usage: hass2ch [command]")

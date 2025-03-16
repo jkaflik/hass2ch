@@ -12,3 +12,12 @@ services:
       timeout: 3s
       retries: 3
       start_period: 5s
+
+  homeassistant:
+    container_name: homeassistant
+    image: homeassistant/home-assistant:latest
+    ports:
+      - "18124:8123"
+    environment:
+      - TZ=Etc/UTC
+    restart: unless-stopped

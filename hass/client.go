@@ -27,6 +27,20 @@ type Client struct {
 	isAuthenticated              bool
 	receiverBufferSize           int
 	subscribeEventsResultTimeout time.Duration
+
+	// Reconnection settings
+	reconnectMu            sync.Mutex
+	isReconnecting         bool
+	subscriptions          []subscriptionInfo
+	reconnectInterval      time.Duration
+	maxReconnectInterval   time.Duration
+	reconnectBackoffFactor float64
+}
+
+type subscriptionInfo struct {
+	ctx        context.Context
+	eventType  EventType
+	outputChan chan *EventMessage // The channel returned to the caller
 }
 
 func (c *Client) WaitAuthenticated(ctx context.Context) error {
@@ -42,18 +56,53 @@ func (c *Client) WaitAuthenticated(ctx context.Context) error {
 	return nil
 }
 
+// WithReconnectConfig sets the reconnection configuration for the client
+func WithReconnectConfig(initialInterval, maxInterval time.Duration, backoffFactor float64) func(*Client) {
+	return func(c *Client) {
+		c.reconnectInterval = initialInterval
+		c.maxReconnectInterval = maxInterval
+		c.reconnectBackoffFactor = backoffFactor
+	}
+}
+
+// NewClient creates a new Home Assistant client with the given host and token.
+// The client supports automatic reconnection with configurable backoff.
+//
+// It maintains subscriptions across reconnects, ensuring that event channels
+// remain valid even if the underlying WebSocket connection is lost and re-established.
+func NewClient(host, token string, opts ...func(*Client)) *Client {
+	c := &Client{
+		Host:                   host,
+		Token:                  token,
+		reconnectInterval:      1 * time.Second,
+		maxReconnectInterval:   30 * time.Second,
+		reconnectBackoffFactor: 1.5,
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
+}
+
+// Connect establishes a connection to the Home Assistant WebSocket API
 func (c *Client) Connect(ctx context.Context) error {
 	url := fmt.Sprintf("%s/api/websocket", c.Host)
+
+	log.Info().Str("url", url).Msg("Connecting to Home Assistant")
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, http.Header{ //nolint:bodyclose
 		"User-Agent": []string{"hass2ch"},
 	})
 
 	if err != nil {
+		log.Error().Err(err).Str("url", url).Msg("Failed to connect to Home Assistant")
 		return err
 	}
 
 	c.conn = conn
+	c.isAuthenticated = false
 	c.receiveCtx, c.receiveCancel = context.WithCancel(context.Background())
 
 	go c.receive()
@@ -73,10 +122,61 @@ func SubscribeEventsWithEventType(eventType EventType) SubscribeEventsOption {
 	}
 }
 
-// SubscribeEvents subscribes to Home Assistant events and returns a channel that will receive the events
+// SubscribeEvents subscribes to Home Assistant events and returns a channel that will receive the events.
+// The returned channel remains valid across connection failures and reconnections, ensuring uninterrupted
+// event delivery. The subscription is automatically restored if the connection is lost and re-established.
 //
 //nolint:gocyclo
 func (c *Client) SubscribeEvents(ctx context.Context, opts ...SubscribeEventsOption) (chan *EventMessage, error) {
+	// Create subscription command
+	cmd := SubscribeEventsMessage{
+		BaseMessage: BaseMessage{
+			Type: MessageTypeSubscribeEvents,
+		},
+	}
+
+	for _, opt := range opts {
+		opt(&cmd)
+	}
+
+	// Create the stable output channel that will be returned to the caller
+	// This channel will persist across reconnections
+	outputChan := make(chan *EventMessage, 100) // Buffer to prevent blocking during reconnection
+
+	// Store subscription info for reconnection
+	c.reconnectMu.Lock()
+	subscription := subscriptionInfo{
+		ctx:        ctx,
+		eventType:  cmd.EventType,
+		outputChan: outputChan,
+	}
+	c.subscriptions = append(c.subscriptions, subscription)
+	c.reconnectMu.Unlock()
+
+	// Start the initial subscription
+	if err := c.startSubscription(ctx, cmd.EventType, outputChan); err != nil {
+		// Remove this subscription from our list since it failed
+		c.reconnectMu.Lock()
+		for i, sub := range c.subscriptions {
+			if sub.outputChan == outputChan {
+				c.subscriptions = append(c.subscriptions[:i], c.subscriptions[i+1:]...)
+				break
+			}
+		}
+		c.reconnectMu.Unlock()
+
+		close(outputChan)
+		return nil, err
+	}
+
+	return outputChan, nil
+}
+
+// startSubscription initiates a subscription to Home Assistant events
+// and forwards events to the provided output channel
+//
+//nolint:gocyclo
+func (c *Client) startSubscription(ctx context.Context, eventType EventType, outputChan chan *EventMessage) error {
 	c.activeReceiversMtx.Lock()
 	c.activeReceiversNum++
 	receiverNum := c.activeReceiversNum
@@ -87,21 +187,18 @@ func (c *Client) SubscribeEvents(ctx context.Context, opts ...SubscribeEventsOpt
 			ID:   receiverNum,
 			Type: MessageTypeSubscribeEvents,
 		},
-	}
-
-	for _, opt := range opts {
-		opt(&cmd)
+		EventType: eventType,
 	}
 
 	payload, err := json.Marshal(cmd)
 	if err != nil {
 		c.activeReceiversMtx.Unlock()
-		return nil, fmt.Errorf("failed to marshal subscribe events message: %w", err)
+		return fmt.Errorf("failed to marshal subscribe events message: %w", err)
 	}
 
 	if err := c.conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 		c.activeReceiversMtx.Unlock()
-		return nil, fmt.Errorf("failed to send message to Home Assistant: %w", err)
+		return fmt.Errorf("failed to send message to Home Assistant: %w", err)
 	}
 
 	if c.activeReceivers == nil {
@@ -129,14 +226,14 @@ func (c *Client) SubscribeEvents(ctx context.Context, opts ...SubscribeEventsOpt
 	select {
 	case <-timeoutCtx.Done():
 		c.closeReceiver(receiverNum)
-		return nil, fmt.Errorf("timeout waiting for Home Assistant to acknowledge subscription")
+		return fmt.Errorf("timeout waiting for Home Assistant to acknowledge subscription")
 	case msg := <-resultChan:
 		// Check if the message is a result message
 		result, ok := msg.(ResultMessage)
 		if !ok {
 			c.closeReceiver(receiverNum)
 			log.Error().Interface("message", msg).Msg("Unexpected message type received waiting for a result")
-			return nil, fmt.Errorf("unexpected message type received waiting for a result")
+			return fmt.Errorf("unexpected message type received waiting for a result")
 		}
 
 		// Check if the subscription was successful
@@ -147,36 +244,50 @@ func (c *Client) SubscribeEvents(ctx context.Context, opts ...SubscribeEventsOpt
 				Str("message", result.Error.Message).
 				Msg("Subscription failed")
 
-			return nil, fmt.Errorf("subscription failed: %s: %s", result.Error.Code, result.Error.Message)
+			return fmt.Errorf("subscription failed: %s: %s", result.Error.Code, result.Error.Message)
 		}
 
-		log.Info().Int("id", receiverNum).Msg("Subscribed to events")
+		log.Info().
+			Int("id", receiverNum).
+			Str("event_type", string(cmd.EventType)).
+			Msg("Subscribed to events")
 	}
 
-	// Create a channel for events only
-	eventChan := make(chan *EventMessage)
-
-	// Start a goroutine to forward events to the event channel
+	// Start a goroutine to forward events to the output channel
 	go func() {
-		defer close(eventChan)
 		for {
 			select {
 			case <-ctx.Done():
+				c.closeReceiver(receiverNum)
 				return
 			case msg, ok := <-resultChan:
 				if !ok {
-					return
+					log.Warn().
+						Int("id", receiverNum).
+						Str("event_type", string(cmd.EventType)).
+						Msg("Event channel closed, connection lost")
+					return // Will be reconnected by reconnect routine
 				}
 
-				// Only forward event messages
+				// Only forward event messages to the output channel
 				if eventMsg, ok := msg.(*EventMessage); ok {
-					eventChan <- eventMsg
+					log.Debug().
+						Str("event_type", string(eventMsg.Event.EventType)).
+						Str("entity_id", eventMsg.Event.Data.EntityID).
+						Msg("Received event")
+
+					select {
+					case outputChan <- eventMsg:
+						// Successfully sent the event
+					case <-ctx.Done():
+						return
+					}
 				}
 			}
 		}
 	}()
 
-	return eventChan, nil
+	return nil
 }
 
 // GetStates gets all states from Home Assistant
@@ -269,6 +380,88 @@ func (c *Client) closeReceiver(receiverNum int) {
 	}
 }
 
+// reconnect handles reconnection to Home Assistant with exponential backoff
+func (c *Client) reconnect(ctx context.Context) {
+	c.reconnectMu.Lock()
+	if c.isReconnecting {
+		c.reconnectMu.Unlock()
+		return
+	}
+	c.isReconnecting = true
+	c.reconnectMu.Unlock()
+
+	go func() {
+		defer func() {
+			c.reconnectMu.Lock()
+			c.isReconnecting = false
+			c.reconnectMu.Unlock()
+		}()
+
+		// Close the current connection gracefully
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
+
+		// Make a copy of subscriptions to restore after reconnection
+		c.reconnectMu.Lock()
+		subscriptions := make([]subscriptionInfo, len(c.subscriptions))
+		copy(subscriptions, c.subscriptions)
+		c.reconnectMu.Unlock()
+
+		// Attempt to reconnect with exponential backoff
+		interval := c.reconnectInterval
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info().Msg("Context canceled, stopping reconnection attempts")
+				return
+			default:
+				log.Info().Dur("interval", interval).Msg("Attempting to reconnect to Home Assistant")
+
+				if err := c.Connect(ctx); err != nil {
+					log.Error().Err(err).Dur("interval", interval).Msg("Failed to reconnect to Home Assistant")
+
+					// Wait and increase backoff interval
+					time.Sleep(interval)
+					interval = time.Duration(float64(interval) * c.reconnectBackoffFactor)
+					if interval > c.maxReconnectInterval {
+						interval = c.maxReconnectInterval
+					}
+					continue
+				}
+
+				// Wait for authentication
+				if err := c.WaitAuthenticated(ctx); err != nil {
+					log.Error().Err(err).Msg("Failed to authenticate after reconnection")
+					continue
+				}
+
+				log.Info().Msg("Successfully reconnected to Home Assistant")
+
+				// Restore subscriptions using the same output channels
+				for _, sub := range subscriptions {
+					log.Info().
+						Str("event_type", string(sub.eventType)).
+						Msg("Restoring subscription after reconnection")
+
+					if err := c.startSubscription(sub.ctx, sub.eventType, sub.outputChan); err != nil {
+						log.Error().
+							Err(err).
+							Str("event_type", string(sub.eventType)).
+							Msg("Failed to restore subscription after reconnection")
+					} else {
+						log.Info().
+							Str("event_type", string(sub.eventType)).
+							Msg("Successfully restored subscription after reconnection")
+					}
+				}
+
+				return
+			}
+		}
+	}()
+}
+
 func (c *Client) receive() {
 	for {
 		select {
@@ -280,11 +473,14 @@ func (c *Client) receive() {
 			if err != nil {
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					log.Info().Msg("Home Assistant websocket connection closed")
+					// Try to reconnect when connection is closed
+					c.reconnect(context.Background())
 					return
 				}
 
-				log.Err(err).Msg("Failed to read message from Home Assistant websocket")
-				continue
+				// For other errors, still attempt to reconnect
+				c.reconnect(context.Background())
+				return
 			}
 
 			// Parse the message
@@ -344,11 +540,25 @@ func (c *Client) handleMessage(msg interface{}) {
 func (c *Client) Close() error {
 	log.Info().Msg("Closing Home Assistant websocket connection")
 
+	// Cancel the receive context to stop the message loop
 	if c.receiveCancel != nil {
 		c.receiveCancel()
 	}
 
-	return c.conn.Close()
+	// Close all subscription output channels
+	c.reconnectMu.Lock()
+	for _, sub := range c.subscriptions {
+		close(sub.outputChan)
+	}
+	c.subscriptions = nil
+	c.reconnectMu.Unlock()
+
+	// Close the WebSocket connection
+	if c.conn != nil {
+		return c.conn.Close()
+	}
+
+	return nil
 }
 
 func (c *Client) authenticate() {
