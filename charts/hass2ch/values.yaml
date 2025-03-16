@@ -40,6 +40,7 @@ secret:
 
 # Application configuration
 config:
+  # Log level (trace, debug, info, warn, error, fatal)
   logLevel: "info"
   metricsEnabled: true
   

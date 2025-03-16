@@ -93,7 +93,7 @@
       "id": 2,
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
@@ -112,7 +112,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hass2ch_hass_connection_status",
+          "expr": "max by(service) (hass2ch_hass_connection_status)",
           "interval": "",
           "legendFormat": "Home Assistant Connection",
           "refId": "A"
@@ -122,7 +122,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "hass2ch_clickhouse_connection_status",
+          "expr": "max by(service) (hass2ch_clickhouse_connection_status)",
           "interval": "",
           "legendFormat": "ClickHouse Connection",
           "refId": "B"
@@ -184,7 +184,8 @@
                 "value": 80
               }
             ]
-          }
+          },
+          "unit": "events/s"
         },
         "overrides": []
       },
@@ -213,9 +214,9 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(hass2ch_events_received_total) - sum(hass2ch_events_filtered_total)",
+          "expr": "sum(rate(hass2ch_events_received_total[5m]))",
           "interval": "",
-          "legendFormat": "Processed Events",
+          "legendFormat": "Receive Rate",
           "refId": "A"
         },
         {
@@ -223,9 +224,9 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(hass2ch_events_received_total)",
+          "expr": "sum(rate(hass2ch_events_received_total[5m])) - sum(rate(hass2ch_events_filtered_total[5m]))",
           "interval": "",
-          "legendFormat": "Total Events",
+          "legendFormat": "Process Rate",
           "refId": "B"
         },
         {
@@ -233,13 +234,13 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(hass2ch_events_filtered_total)",
+          "expr": "sum(rate(hass2ch_events_filtered_total[5m]))",
           "interval": "",
-          "legendFormat": "Filtered Events",
+          "legendFormat": "Filter Rate",
           "refId": "C"
         }
       ],
-      "title": "Event Counts",
+      "title": "Event Rates",
       "type": "timeseries"
     },
     {
