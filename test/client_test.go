@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jkaflik/hass2ch/hass"
+
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"

@@ -92,7 +92,8 @@ func (c *Client) Connect(ctx context.Context) error {
 
 	log.Info().Str("url", url).Msg("Connecting to Home Assistant")
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, http.Header{ //nolint:bodyclose
+	//nolint:bodyclose // see Clent.Close
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, http.Header{
 		"User-Agent": []string{"hass2ch"},
 	})
 
@@ -125,8 +126,6 @@ func SubscribeEventsWithEventType(eventType EventType) SubscribeEventsOption {
 // SubscribeEvents subscribes to Home Assistant events and returns a channel that will receive the events.
 // The returned channel remains valid across connection failures and reconnections, ensuring uninterrupted
 // event delivery. The subscription is automatically restored if the connection is lost and re-established.
-//
-//nolint:gocyclo
 func (c *Client) SubscribeEvents(ctx context.Context, opts ...SubscribeEventsOption) (chan *EventMessage, error) {
 	// Create subscription command
 	cmd := SubscribeEventsMessage{
@@ -174,8 +173,6 @@ func (c *Client) SubscribeEvents(ctx context.Context, opts ...SubscribeEventsOpt
 
 // startSubscription initiates a subscription to Home Assistant events
 // and forwards events to the provided output channel
-//
-//nolint:gocyclo
 func (c *Client) startSubscription(ctx context.Context, eventType EventType, outputChan chan *EventMessage) error {
 	c.activeReceiversMtx.Lock()
 	c.activeReceiversNum++

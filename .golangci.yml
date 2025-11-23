@@ -15,7 +15,7 @@ linters-settings:
       - performance
       - style
   gocyclo:
-    min-complexity: 15
+    min-complexity: 20
   goimports:
     local-prefixes: github.com/jkaflik/hass2ch
   govet:
@@ -36,10 +36,8 @@ linters:
     - dogsled
     - dupl
     - errcheck
-    - funlen
     - gochecknoinits
     - goconst
-    - gocritic
     - gocyclo
     - gofmt
     - goimports

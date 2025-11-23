@@ -167,7 +167,7 @@ type insert struct {
 }
 
 // createStateChangeTable creates a table for a state change event in ClickHouse
-func createStateChangeTable(ctx context.Context, client *clickhouse.Client, database, tableName string, stateType string) error {
+func createStateChangeTable(ctx context.Context, client *clickhouse.Client, database, tableName, stateType string) error {
 	query := fmt.Sprintf(stateChangeDDL, database, tableName, stateType, stateType)
 	return client.Execute(ctx, query, nil)
 }

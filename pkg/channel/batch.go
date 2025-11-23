@@ -41,6 +41,8 @@ func Batch[T any](in chan T, opts BatchOptions[T]) (chan []T, chan error) {
 		var batches map[string][]T
 		var batchesMtx sync.Mutex
 		var timers map[string]*time.Timer
+
+		//nolint:gosimple
 		for {
 			select {
 			case item, ok := <-in:

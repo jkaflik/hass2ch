@@ -28,7 +28,7 @@ var (
 	secure = flag.Bool("secure", false, "Use secure connection")
 
 	// ClickHouse connection
-	chUrl      = flag.String("clickhouse-url", "http://localhost:8123", "ClickHouse HTTP URL")
+	chURL      = flag.String("clickhouse-url", "http://localhost:8123", "ClickHouse HTTP URL")
 	chDatabase = flag.String("clickhouse-database", "hass", "ClickHouse database")
 	chUsername = flag.String("clickhouse-username", "default", "ClickHouse username")
 	chPassword = flag.String("clickhouse-password", "", "ClickHouse password. It can also be set via CLICKHOUSE_PASSWORD environment variable")
@@ -102,7 +102,6 @@ func dumpEvents(ctx context.Context, c *hass.Client) {
 	}()
 }
 
-//nolint:gocyclo
 func main() {
 	flag.Parse()
 	args := flag.Args()
@@ -139,8 +138,8 @@ func main() {
 	if *enableMetrics {
 		metricsServer = metrics.NewServer(*metricsAddr)
 		go func() {
-			if err := metricsServer.Start(); err != nil {
-				log.Error().Err(err).Msg("Failed to start metrics server")
+			if startErr := metricsServer.Start(); startErr != nil {
+				log.Error().Err(startErr).Msg("Failed to start metrics server")
 			}
 		}()
 		log.Info().Str("addr", *metricsAddr).Msg("Started metrics server")
@@ -176,7 +175,7 @@ func main() {
 
 		// Create ClickHouse client with retry capabilities
 		chClient, err := clickhouse.NewClient(
-			*chUrl,
+			*chURL,
 			*chUsername,
 			*chPassword,
 			clickhouse.WithHTTPClient(httpClient),
