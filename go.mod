@@ -3,7 +3,7 @@ module github.com/jkaflik/hass2ch
 go 1.22
 
 require (
-	github.com/goccy/go-json v0.10.3
+	github.com/goccy/go-json v0.10.5
 	github.com/gorilla/websocket v1.5.3
 	github.com/prometheus/client_golang v1.21.1
 	github.com/rs/zerolog v1.34.0
